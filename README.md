@@ -200,7 +200,8 @@ Gemini understands context. Rule-based systems don't.
 ## Prizes Targeted
 
 - 🏆 Best Use of Gemini API
-- 🏆 Best Use of Vultr
+- 🏆 Best Creative Hack
+- 🏆 Best Hardware Hack
 - 🏆 Best Use of MongoDB Atlas
 - 🏆 Best Social Good Hack
 
