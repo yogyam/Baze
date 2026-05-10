@@ -1,0 +1,7 @@
+fastapi
+uvicorn
+pymongo
+python-dotenv
+google-genai
+opencv-python
+pyserial

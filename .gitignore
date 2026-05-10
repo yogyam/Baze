@@ -1,0 +1,23 @@
+# Environment
+.env
+backend/.env
+
+# Seed script (demo only)
+backend/seed_demo.py
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+backend/venv/
+venv/
+
+# YOLO model cache
+*.pt
+runs/
+
+# Camera temp
+/tmp/cs_frame.jpg
+
+# macOS
+.DS_Store
