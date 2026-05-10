@@ -1,8 +1,8 @@
-# CycleSentinel v2 — Bimodal Bicycle Safety System
+# Baze — Bimodal Bicycle Safety System
 
-> **HackDavis 2026** · Built by Yogya Mehrotra (Computer Engineering, UC Santa Cruz)
+> **HackDavis 2026** · Built by Yogya Mehrotra, Sid Shastri, Adam Carter, Karthik Konda (UC Santa Cruz)
 
-CycleSentinel is an autonomous safety attachment for bicycles that fuses **vibration sensing** and **computer vision** to detect, classify, and reroute around road hazards in real time — powered by Gemini multimodal AI and a cloud-hosted FastAPI backend.
+Baze is an autonomous safety attachment for bicycles that fuses **vibration sensing** and **computer vision** to detect, classify, and reroute around road hazards in real time — powered by Gemini multimodal AI and a cloud-hosted FastAPI backend.
 
 ---
 
@@ -12,13 +12,13 @@ Every year, thousands of cyclists are injured due to road hazards — potholes, 
 
 On college campuses like UC Davis, where thousands of students commute daily by bike, deteriorating infrastructure goes unreported and unrepaired for months. There is no system that tells you **where** the dangerous roads are before you ride them, and no feedback loop that gets those hazards fixed.
 
-**CycleSentinel solves this.**
+**Baze solves this.**
 
 ---
 
 ## What It Does
 
-CycleSentinel mounts on any bicycle and continuously monitors two data streams:
+Baze mounts on any bicycle and continuously monitors two data streams:
 
 ### 1. IMU (Vibration Sensing)
 An accelerometer reads road surface conditions 100 times per second. A 500ms rolling window computes the **total vibration magnitude** across all three axes (gravity-removed), capturing both sustained roughness and sharp impact spikes.
@@ -43,14 +43,14 @@ Given a start and end location, the system queries MongoDB for all hazard zones 
 
 ## Social Impact
 
-| Problem | CycleSentinel's Response |
+| Problem | Baze's Response |
 |---|---|
 | Dangerous roads go unreported | Automatic hazard logging with GPS coordinates |
 | Cyclists hit hazards they can't see | Real-time warnings before you reach the danger zone |
 | Campus facilities have no feedback loop | AI-generated work orders with specific location data |
 | Data stays siloed on one device | Shared hazard map benefits every cyclist on campus |
 
-Every RED alert automatically generates an **AggieFacilities-style work order** via Gemini — complete with vibration magnitude, camera context, and location — creating a direct pipeline from detection to repair. The more cyclists use CycleSentinel, the better the map gets for everyone.
+Every RED alert automatically generates an **AggieFacilities-style work order** via Gemini — complete with vibration magnitude, camera context, and location — creating a direct pipeline from detection to repair. The more cyclists use Baze, the better the map gets for everyone.
 
 ---
 
@@ -114,10 +114,10 @@ Every RED alert automatically generates an **AggieFacilities-style work order** 
 ## Repository Structure
 
 ```
-Baize/
+Baze/
 ├── arduino/
-│   └── CycleSentinel/
-│       └── CycleSentinel.ino   # Arduino firmware — reads IMU, streams raw data
+│   └── Baze/
+│       └── Baze.ino   # Arduino firmware — reads IMU, streams raw data
 ├── backend/
 │   ├── main.py                 # FastAPI backend — event ingestion, Gemini, routing
 │   └── requirements.txt
@@ -138,7 +138,7 @@ Baize/
 - Google Gemini API key (aistudio.google.com)
 
 ### 1. Flash the Arduino
-Open `arduino/CycleSentinel/CycleSentinel.ino` in Arduino IDE and upload to your Arduino Uno R4 WiFi. Wire the Grove 3-Axis Accelerometer to the I2C port on the Grove Shield.
+Open `arduino/Baze/Baze.ino` in Arduino IDE and upload to your Arduino Uno R4 WiFi. Wire the Grove 3-Axis Accelerometer to the I2C port on the Grove Shield.
 
 ### 2. Set up the backend
 ```bash
@@ -187,7 +187,7 @@ Open `dashboard/index.html` in your browser.
 
 ## Why Gemini?
 
-Traditional threshold-based systems fire false alarms constantly — a single bump, a cable, someone touching the sensor. By sending the **full 5-second time series** to Gemini alongside the camera image, CycleSentinel can distinguish between:
+Traditional threshold-based systems fire false alarms constantly — a single bump, a cable, someone touching the sensor. By sending the **full 5-second time series** to Gemini alongside the camera image, Baze can distinguish between:
 
 - A hand touching a wire (GREEN — discard)
 - A single speed bump (ORANGE — caution)
