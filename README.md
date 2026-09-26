@@ -1,210 +1,136 @@
-# Baze — Bimodal Bicycle Safety System
+# Baze: Real-Time Bike Hazard Detection
 
-> **HackDavis 2026** · Built by Yogya Mehrotra, Sid Shastri, Adam Carter, Karthik Konda (UC Santa Cruz)
+Baze clips onto a bike and detects road hazards while you ride. It watches for them with a vibration sensor and a camera, then puts them on a live campus map with routes that go around them.
 
-Baze is an autonomous safety attachment for bicycles that fuses **vibration sensing** and **computer vision** to detect, classify, and reroute around road hazards in real time — powered by Gemini multimodal AI and a cloud-hosted FastAPI backend.
+**Built in 48 hours at HackDavis 2026.**
 
----
+![Python](https://img.shields.io/badge/Python-3.11-3776AB?logo=python&logoColor=white)
+![FastAPI](https://img.shields.io/badge/FastAPI-009688?logo=fastapi&logoColor=white)
+![MongoDB](https://img.shields.io/badge/MongoDB_Atlas-47A248?logo=mongodb&logoColor=white)
+![Arduino](https://img.shields.io/badge/Arduino-C++-00979D?logo=arduino&logoColor=white)
+![Gemini](https://img.shields.io/badge/Gemini_2.5_Flash-8E75B2?logo=googlegemini&logoColor=white)
 
-## The Problem
-
-Every year, thousands of cyclists are injured due to road hazards — potholes, cracked pavement, debris, and unexpected obstacles. Unlike cars, bicycles have no suspension, no crumple zones, and no onboard safety systems. Cyclists are entirely dependent on their own reaction time and visibility.
-
-On college campuses like UC Davis, where thousands of students commute daily by bike, deteriorating infrastructure goes unreported and unrepaired for months. There is no system that tells you **where** the dangerous roads are before you ride them, and no feedback loop that gets those hazards fixed.
-
-**Baze solves this.**
-
----
-
-## What It Does
-
-Baze mounts on any bicycle and continuously monitors two data streams:
-
-### 1. IMU (Vibration Sensing)
-An accelerometer reads road surface conditions 100 times per second. A 500ms rolling window computes the **total vibration magnitude** across all three axes (gravity-removed), capturing both sustained roughness and sharp impact spikes.
-
-### 2. Camera (Visual Context)
-A forward-facing camera captures the scene at the moment a vibration event is detected. The raw frame is sent alongside the sensor data to Gemini for analysis.
-
-### 3. Gemini Multimodal AI Fusion
-When the bridge detects 5 seconds of unusual vibration, it sends the full time-series data + the camera snapshot to **Gemini 2.5 Flash**. Gemini analyzes both signals together and returns:
-- A **severity classification** (RED / ORANGE / GREEN)
-- A **plain-English warning** for the cyclist ("Rocky road section ahead, slow down")
-
-GREEN events are silently discarded. Only genuine hazards reach the map.
-
-### 4. Live Hazard Map
-A real-time dashboard shows hazard zones across the UC Davis campus as translucent circles — red for critical, orange for moderate. Clicking any circle reveals Gemini's AI-generated description of what happened at that location.
-
-### 5. Safe Route Planning
-Given a start and end location, the system queries MongoDB for all hazard zones near the direct route and generates a detour that avoids them — a campus-scale Waze for cyclists.
+<p align="center">
+  <img src="docs/images/baze-front.jpg" alt="Front-facing camera mounted on the bike basket" width="45%">
+  &nbsp;
+  <img src="docs/images/baze-sensor.jpg" alt="Arduino and accelerometer mounted on the bike frame" width="45%">
+</p>
+<p align="center"><em>Left: the front-facing camera on the basket. Right: the Arduino Uno R4 and accelerometer on the frame.</em></p>
 
 ---
 
-## Social Impact
+## The problem
 
-| Problem | Baze's Response |
-|---|---|
-| Dangerous roads go unreported | Automatic hazard logging with GPS coordinates |
-| Cyclists hit hazards they can't see | Real-time warnings before you reach the danger zone |
-| Campus facilities have no feedback loop | AI-generated work orders with specific location data |
-| Data stays siloed on one device | Shared hazard map benefits every cyclist on campus |
+Bikes don't have suspension, crumple zones, or any safety systems built in. When a cyclist hits a pothole, crack, or debris they didn't see, they can get hurt. On a campus like UC Davis, thousands of students ride every day, and damaged pavement can go months without anyone reporting it.
 
-Every RED alert automatically generates an **AggieFacilities-style work order** via Gemini — complete with vibration magnitude, camera context, and location — creating a direct pipeline from detection to repair. The more cyclists use Baze, the better the map gets for everyone.
+Baze turns every ride into a road-quality survey. It detects hazards automatically, shows them on a shared map, and routes other riders around them.
 
----
+## How it works
+
+1. **Sense.** An Arduino reads a 3-axis accelerometer and streams its vibration readings (RMS and peak g-force) to a laptop over serial.
+2. **Trigger.** An edge script watches for readings above a threshold (`rms > 0.12g` or `peak > 0.20g`). When one arrives, it takes a camera snapshot and records the next 5 seconds of sensor data.
+3. **Ingest.** The event goes to a FastAPI backend, which saves it right away as a `PENDING` hazard and responds without waiting for the analysis.
+4. **Classify.** A background task sends the vibration time series and the camera frame to Gemini 2.5 Flash. Gemini rates the event **RED**, **ORANGE**, or **GREEN** and writes a plain-English warning. GREEN events are thrown out.
+5. **Map and route.** The dashboard polls the API every 3 seconds and draws the hazards. The route planner calculates a bike route, finds hazards near it, and computes a detour around them.
 
 ## Architecture
 
-```
-┌─────────────────────────────────────────────────────────────┐
-│                        EDGE LAYER                           │
-│                                                             │
-│  [Arduino Uno R4]  →  [bridge.py]  →  [camera.py]         │
-│  MMA7660FC IMU         Trigger &        Raw frame           │
-│  raw x,y,z,rms,peak    recording        to /tmp/            │
-└──────────────────────────────┬──────────────────────────────┘
-                               │ POST /api/event
-                               │ {time series + image}
-┌──────────────────────────────▼──────────────────────────────┐
-│                      CLOUD LAYER (Vultr)                    │
-│                                                             │
-│  FastAPI Backend                                            │
-│  ├── /api/event     → stores PENDING spot in MongoDB        │
-│  ├── _analyze_event → Gemini 2.5 Flash (background task)   │
-│  │   ├── image + vibration time series → severity + warning │
-│  │   └── GREEN → discard | RED/ORANGE → update MongoDB      │
-│  ├── /api/map/hotspots → GeoJSON for dashboard              │
-│  └── /api/route    → OSRM safe routing around hazards       │
-│                                                             │
-│  MongoDB Atlas (2dsphere geo index)                         │
-└──────────────────────────────┬──────────────────────────────┘
-                               │ polls every 3s
-┌──────────────────────────────▼──────────────────────────────┐
-│                     DASHBOARD LAYER                         │
-│                                                             │
-│  Leaflet.js + CartoDB Voyager tiles                         │
-│  ├── Live hazard circles (RED/ORANGE, translucent)          │
-│  ├── Gemini AI summary in popup + sidebar                   │
-│  ├── Safe route planner (address or map-click)              │
-│  └── Direct vs safe route comparison                        │
-└─────────────────────────────────────────────────────────────┘
+```mermaid
+flowchart LR
+    subgraph Edge
+        A[Arduino Uno R4<br/>MMA7660FC IMU] -- serial JSON --> B[bridge.py<br/>threshold trigger]
+        C[camera.py<br/>webcam frames] --> B
+    end
+    subgraph Cloud
+        D[FastAPI backend]
+        E[(MongoDB Atlas<br/>2dsphere index)]
+        F[Gemini 2.5 Flash]
+        G[OSRM bike routing]
+    end
+    B -- POST /api/event --> D
+    D -- insert PENDING --> E
+    D -- background task --> F
+    F -- severity + warning --> E
+    D -- route query --> G
+    H[Leaflet.js dashboard] -- GET /api/map/hotspots<br/>POST /api/route --> D
 ```
 
----
+## Engineering highlights
 
-## Tech Stack
+- **Asynchronous ingestion.** `/api/event` saves the event and returns right away. The slow multimodal AI call runs as a FastAPI background task, so the edge device never waits on the model.
+- **Multimodal classification instead of fixed thresholds.** Threshold rules alone set off false alarms constantly: a single bump, a loose cable, or someone touching the sensor. Gemini looks at the full 5-second vibration curve together with the camera frame, so it can tell a speed bump (ORANGE) from sustained rough pavement with debris in view (RED).
+- **Geospatial storage.** Hazards are stored as GeoJSON points with a MongoDB `2dsphere` index. The map endpoint returns a GeoJSON `FeatureCollection` that Leaflet renders directly.
+- **Hazard-aware routing.** The planner gets a direct route from OSRM and flags hazards within 50 m of it. It groups hazards within 200 m of each other into clusters, then tries detour waypoints offset 65 m to the left and right of each cluster. It keeps the shortest detour and falls back to the direct route if the detour would be more than 60% longer.
+- **Rate limiting at the edge.** After each event, the bridge waits 15 seconds before it can trigger again, so one rough stretch doesn't flood the backend.
+
+## Tech stack
 
 | Layer | Technology |
-|---|---|
-| Microcontroller | Arduino Uno R4 WiFi |
-| IMU Sensor | MMA7660FC (Grove 3-Axis ±1.5g) |
-| Edge Bridge | Python + pyserial |
-| Camera | iPhone Continuity Camera / Logitech webcam |
-| Backend | FastAPI + Uvicorn |
-| Cloud Compute | Vultr Cloud Instance |
+| --- | --- |
+| Hardware | Arduino Uno R4 WiFi, Grove MMA7660FC 3-axis accelerometer, USB webcam |
+| Firmware | C++ (Arduino) |
+| Edge | Python, pyserial, OpenCV |
+| Backend | FastAPI, Uvicorn, Pydantic |
+| Database | MongoDB Atlas (geospatial `2dsphere` index) |
 | AI | Google Gemini 2.5 Flash (multimodal) |
-| Database | MongoDB Atlas (2dsphere geospatial index) |
-| Routing | OSRM (OpenStreetMap bike routing) |
-| Geocoding | Nominatim |
-| Dashboard | Vanilla JS + Leaflet.js |
+| Routing | OSRM (OpenStreetMap bike profile), Nominatim geocoding |
+| Frontend | JavaScript, Leaflet.js |
 
----
+## API
 
-## Repository Structure
+| Method | Endpoint | Description |
+| --- | --- | --- |
+| `POST` | `/api/event` | Takes in a sensor session (time series + optional image) and queues AI analysis |
+| `GET` | `/api/map/hotspots` | Returns all hazards as a GeoJSON `FeatureCollection` |
+| `POST` | `/api/route` | Returns the direct route and a hazard-avoiding route between two points |
+| `DELETE` | `/api/map/reset` | Clears all hazards |
+| `GET` | `/health` | Health check with the hazard count |
+
+## Repository structure
 
 ```
 Baze/
-├── arduino/
-│   └── Baze/
-│       └── Baze.ino   # Arduino firmware — reads IMU, streams raw data
+├── arduino/CycleSentinel/CycleSentinel.ino   # Firmware: reads the IMU, streams JSON over serial
+├── bridge.py                                 # Edge: trigger detection, session recording, upload
+├── camera.py                                 # Edge: captures webcam frames for analysis
 ├── backend/
-│   ├── main.py                 # FastAPI backend — event ingestion, Gemini, routing
+│   ├── main.py                               # FastAPI: ingestion, Gemini analysis, geo queries, routing
 │   └── requirements.txt
-├── bridge.py                   # Serial bridge — trigger detection, session recording
-├── camera.py                   # Camera capture — saves frames for Gemini
-└── dashboard/
-    └── index.html              # Live hazard map — Leaflet.js dashboard
+├── dashboard/index.html                      # Live hazard map and route planner
+└── docs/images/                              # Project photos
 ```
 
----
+## Running locally
 
-## How to Run
+**Prerequisites:** Python 3.11+, the Arduino IDE with the "Arduino UNO R4 Boards" package, a MongoDB Atlas cluster (the free tier works), and a Gemini API key.
 
-### Prerequisites
-- Arduino IDE with "Arduino UNO R4 Boards" package installed
-- Python 3.11+
-- MongoDB Atlas account (free tier)
-- Google Gemini API key (aistudio.google.com)
-
-### 1. Flash the Arduino
-Open `arduino/Baze/Baze.ino` in Arduino IDE and upload to your Arduino Uno R4 WiFi. Wire the Grove 3-Axis Accelerometer to the I2C port on the Grove Shield.
-
-### 2. Set up the backend
 ```bash
+# 1. Backend
 cd backend
-python3 -m venv venv
-venv/bin/pip install -r requirements.txt
+python3 -m venv venv && source venv/bin/activate
+pip install -r requirements.txt
+echo "MONGO_URI=mongodb+srv://..."   >> .env
+echo "GEMINI_API_KEY=..."            >> .env
+uvicorn main:app --host 0.0.0.0 --port 8000
+
+# 2. Firmware: open arduino/CycleSentinel/CycleSentinel.ino in the Arduino IDE and upload it
+#    (plug the accelerometer into the Grove Shield's I2C port, powered at 3.3V)
+
+# 3. Edge scripts, in separate terminals from the repo root
+python3 camera.py
+python3 bridge.py
+
+# 4. Dashboard
+open dashboard/index.html
 ```
 
-Create `backend/.env`:
-```
-MONGO_URI=mongodb+srv://...
-GEMINI_API_KEY=...
-```
+## Limitations and next steps
 
-```bash
-venv/bin/uvicorn main:app --host 0.0.0.0 --port 8000
-```
+- **Location is simulated.** There was no GPS module in the hackathon build, so the backend places hazards along preset UC Davis campus waypoints. Adding a GPS module is the top priority.
+- **The edge device is tethered.** The bridge runs on a laptop over USB. Next, the trigger logic should move onto the microcontroller so events upload over Wi-Fi.
+- **The dashboard polls.** It checks the API every 3 seconds. WebSockets or server-sent events would push updates as they happen.
+- **Facilities reporting.** RED hazards could automatically become work orders for campus facilities, closing the loop from detection to repair.
 
-### 3. Run the bridge
-```bash
-venv/bin/python3 bridge.py
-```
+## Team
 
-### 4. Run the camera (optional)
-```bash
-venv/bin/python3 camera.py
-```
-
-### 5. Open the dashboard
-Open `dashboard/index.html` in your browser.
-
----
-
-## The Detection Flow
-
-1. Arduino streams `{x, y, z, rms, peak}` over USB serial at 2 Hz
-2. `bridge.py` monitors for `rms > 0.12g` or `peak > 0.20g` — anything above smooth riding
-3. On trigger: snapshot the camera, record 5 seconds of IMU data
-4. POST the full time-series + image to the backend
-5. Backend stores a PENDING spot, kicks off Gemini analysis in the background
-6. Gemini reads the vibration curve over time + the image, classifies RED/ORANGE/GREEN
-7. GREEN → silently deleted. RED/ORANGE → map pin appears with Gemini's warning
-8. Dashboard polls every 3 seconds and updates automatically
-
----
-
-## Why Gemini?
-
-Traditional threshold-based systems fire false alarms constantly — a single bump, a cable, someone touching the sensor. By sending the **full 5-second time series** to Gemini alongside the camera image, Baze can distinguish between:
-
-- A hand touching a wire (GREEN — discard)
-- A single speed bump (ORANGE — caution)
-- 5 seconds of sustained rough pavement with debris in frame (RED — critical)
-
-Gemini understands context. Rule-based systems don't.
-
----
-
-## Prizes Targeted
-
-- 🏆 Best Use of Gemini API
-- 🏆 Best Creative Hack
-- 🏆 Best Hardware Hack
-- 🏆 Best Use of MongoDB Atlas
-- 🏆 Best Social Good Hack
-
----
-
-*Built in 48 hours at HackDavis 2026.*
+Built by **Yogya Mehrotra**, **Sid Shastri**, **Adam Carter**, and **Karthik Konda** at HackDavis 2026.
