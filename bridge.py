@@ -3,6 +3,11 @@ CycleSentinel — IMU Bridge
 Reads raw sensor data from Arduino, triggers a recording session when
 something interesting is detected, then sends the full time-series +
 camera snapshot to the backend. Gemini decides severity — not rules.
+
+Transport (BAZE_TRANSPORT env var):
+  kafka (default) — publish each event to the `baze.sensor-events` topic,
+                    keyed by device ID. The backend consumes from there.
+  http            — POST straight to the backend's /api/event (original path).
 """
 
 import sys
@@ -10,6 +15,7 @@ import os
 import json
 import time
 import base64
+import uuid
 import urllib.request
 import glob
 
@@ -27,6 +33,40 @@ TRIGGER_PEAK   = 0.20   # g — any noticeable impact
 # ── Recording session ──────────────────────────────────────────────────────
 RECORD_SECONDS = 5.0    # collect this many seconds of data after trigger
 COOLDOWN_S     = 15.0   # minimum gap between sessions (prevents spam)
+
+# ── Transport ──────────────────────────────────────────────────────────────
+TRANSPORT       = os.environ.get("BAZE_TRANSPORT", "kafka")   # kafka | http
+KAFKA_BOOTSTRAP = os.environ.get("KAFKA_BOOTSTRAP_SERVERS", "localhost:9092")
+KAFKA_TOPIC     = os.environ.get("KAFKA_TOPIC", "baze.sensor-events")
+DEVICE_ID       = os.environ.get("BAZE_DEVICE_ID", "bike-01")
+
+_producer = None
+
+
+def get_producer():
+    """Create the Kafka producer once, on first use."""
+    global _producer
+    if _producer is None:
+        from confluent_kafka import Producer
+        _producer = Producer({
+            "bootstrap.servers": KAFKA_BOOTSTRAP,
+            # Wait for the broker to confirm the write before calling it sent.
+            "acks": "all",
+            # Retries can't create duplicates or reorder messages.
+            "enable.idempotence": True,
+            # Events include a base64 camera frame; match the topic's 5 MB limit.
+            "message.max.bytes": 5242880,
+        })
+    return _producer
+
+
+def _on_delivery(err, msg) -> None:
+    """Called by the producer once the broker accepts (or rejects) a message."""
+    if err is not None:
+        print(f"  [warn] kafka delivery failed: {err}")
+    else:
+        print(f"  → event on {msg.topic()} | partition {msg.partition()} "
+              f"offset {msg.offset()} | backend will pick it up")
 
 
 def find_port() -> str:
@@ -49,18 +89,50 @@ def read_frame() -> str | None:
         return None
 
 
-def post_event(samples: list, image_b64: str | None) -> None:
+def build_event(samples: list, image_b64: str | None) -> dict:
     max_peak = max(s["peak"] for s in samples)
     avg_rms  = sum(s["rms"] for s in samples) / len(samples)
 
-    payload = {
+    return {
+        # Unique per event, so the backend can ignore a duplicate delivery.
+        "event_id":   str(uuid.uuid4()),
+        "device_id":  DEVICE_ID,
         "samples":    samples,
         "duration_s": len(samples) * 0.5,
         "max_peak":   round(max_peak, 4),
         "avg_rms":    round(avg_rms, 4),
         "image_b64":  image_b64,
     }
-    body = json.dumps(payload).encode()
+
+
+def send_event(event: dict) -> None:
+    if TRANSPORT == "kafka":
+        publish_event(event)
+    else:
+        post_event(event)
+
+
+def publish_event(event: dict) -> None:
+    producer = get_producer()
+    try:
+        # Keying by device ID sends every event from one bike to the same
+        # partition, so that bike's events stay in order.
+        producer.produce(
+            KAFKA_TOPIC,
+            key=event["device_id"],
+            value=json.dumps(event).encode(),
+            on_delivery=_on_delivery,
+        )
+    except Exception as e:
+        print(f"  [warn] kafka produce failed: {e}")
+        return
+    # Block until the broker acknowledges. Events are 15 s apart, so the
+    # extra wait doesn't matter, and the log shows the result right away.
+    producer.flush(10)
+
+
+def post_event(event: dict) -> None:
+    body = json.dumps(event).encode()
     req  = urllib.request.Request(
         BACKEND, data=body,
         headers={"Content-Type": "application/json"}, method="POST"
@@ -74,6 +146,8 @@ def post_event(samples: list, image_b64: str | None) -> None:
 
 
 def run(port: str) -> None:
+    target = f"kafka {KAFKA_BOOTSTRAP} → {KAFKA_TOPIC}" if TRANSPORT == "kafka" else BACKEND
+    print(f"[bridge] Sending events via {TRANSPORT} ({target}) as {DEVICE_ID}")
     print(f"[bridge] Connecting to {port} @ {BAUD_RATE}…")
     ser = serial.Serial(port, BAUD_RATE, timeout=2)
     time.sleep(2)   # wait for Arduino to boot — do NOT reset buffer (we want startup messages)
@@ -140,7 +214,7 @@ def run(port: str) -> None:
                 if elapsed >= RECORD_SECONDS:
                     print(f"  ✓ session complete — {len(session)} samples, "
                           f"peak={max(s['peak'] for s in session):.3f}g")
-                    post_event(session, snapshot)
+                    send_event(build_event(session, snapshot))
                     last_event_t = now
                     state        = "IDLE"
                     session      = []
@@ -154,6 +228,8 @@ def run(port: str) -> None:
             time.sleep(0.2)
 
     ser.close()
+    if _producer is not None:
+        _producer.flush(10)
 
 
 if __name__ == "__main__":
