@@ -6,6 +6,8 @@ import json
 import time
 import base64
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 
 from fastapi import FastAPI, BackgroundTasks
@@ -23,11 +25,34 @@ mongo = MongoClient(os.environ["MONGO_URI"])
 db = mongo["cyclesentinel"]
 spots = db["spots"]
 spots.create_index([("location", GEOSPHERE)])  # 2dsphere for geo queries
+spots.create_index("spot_id", unique=True)       # makes re-delivered events no-ops
 
 gemini = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
 
+# ── Kafka ingestion (optional) ──────────────────────────────────────────────
+# When KAFKA_BOOTSTRAP_SERVERS is set, a background thread consumes sensor
+# events from Kafka. POST /api/event keeps working either way.
+KAFKA_BOOTSTRAP = os.environ.get("KAFKA_BOOTSTRAP_SERVERS")
+
+# Gemini calls take a few seconds, so the Kafka consumer hands them to this
+# pool instead of blocking the next message.
+analysis_pool = ThreadPoolExecutor(max_workers=4, thread_name_prefix="gemini")
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    stop = None
+    if KAFKA_BOOTSTRAP:
+        from kafka_consumer import start_in_background
+        _, stop = start_in_background(_ingest_from_kafka)
+    yield
+    if stop:
+        stop.set()
+    analysis_pool.shutdown(wait=False)
+
+
 # ── App ────────────────────────────────────────────────────────────────────
-app = FastAPI(title="CycleSentinel")
+app = FastAPI(title="CycleSentinel", lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -64,6 +89,8 @@ def next_location() -> list[float]:
 
 # ── Models ─────────────────────────────────────────────────────────────────
 class SensorEvent(BaseModel):
+    event_id:   str | None = None   # set by bridge.py; used as spot_id
+    device_id:  str | None = None   # which bike sent it (Kafka message key)
     samples:    list[dict]   # [{t, x, y, z, rms, peak}, ...]
     duration_s: float
     max_peak:   float
@@ -147,22 +174,46 @@ Respond ONLY as valid JSON, nothing else:
     )
 
 
+# ── Ingestion (shared by HTTP and Kafka) ───────────────────────────────────
+def _save_pending(event: SensorEvent) -> tuple[str, bool]:
+    """Save the event as a PENDING spot. Returns (spot_id, is_new).
+
+    Uses an upsert keyed on spot_id, so if Kafka delivers the same event
+    twice, the second delivery changes nothing and is_new is False.
+    """
+    spot_id = event.event_id or str(uuid.uuid4())
+    result = spots.update_one(
+        {"spot_id": spot_id},
+        {"$setOnInsert": {
+            "spot_id":    spot_id,
+            "device_id":  event.device_id,
+            "location":   {"type": "Point", "coordinates": next_location()},
+            "severity":   "PENDING",
+            "metrics":    {"max_peak": event.max_peak, "avg_rms": event.avg_rms,
+                           "samples": len(event.samples)},
+            "timestamp":  datetime.now(timezone.utc).isoformat(),
+            "ai_summary": "⏳ Analyzing…",
+        }},
+        upsert=True,
+    )
+    return spot_id, result.upserted_id is not None
+
+
+def _ingest_from_kafka(payload: dict) -> None:
+    event = SensorEvent(**payload)   # raises ValueError on a bad payload
+    spot_id, is_new = _save_pending(event)
+    if is_new:
+        analysis_pool.submit(_analyze_event, spot_id, event)
+    else:
+        print(f"[kafka] {spot_id[:8]}… already ingested, skipping duplicate")
+
+
 # ── Endpoints ──────────────────────────────────────────────────────────────
 @app.post("/api/event")
 async def receive_event(event: SensorEvent, bg: BackgroundTasks):
-    spot_id = str(uuid.uuid4())
-    spot = {
-        "spot_id":    spot_id,
-        "location":   {"type": "Point", "coordinates": next_location()},
-        "severity":   "PENDING",
-        "metrics":    {"max_peak": event.max_peak, "avg_rms": event.avg_rms,
-                       "samples": len(event.samples)},
-        "timestamp":  datetime.now(timezone.utc).isoformat(),
-        "ai_summary": "⏳ Analyzing…",
-    }
-    spots.insert_one(spot)
-    spot.pop("_id", None)
-    bg.add_task(_analyze_event, spot_id, event)
+    spot_id, is_new = _save_pending(event)
+    if is_new:
+        bg.add_task(_analyze_event, spot_id, event)
     return {"spot_id": spot_id, "status": "analyzing"}
 
 
@@ -196,7 +247,8 @@ async def reset_map():
 
 @app.get("/health")
 async def health():
-    return {"status": "ok", "spots_in_db": spots.count_documents({})}
+    return {"status": "ok", "spots_in_db": spots.count_documents({}),
+            "kafka": KAFKA_BOOTSTRAP is not None}
 
 
 # ── Routing helpers ────────────────────────────────────────────────────────
